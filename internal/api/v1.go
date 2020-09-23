@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"math/big"
 	"net/http"
@@ -31,7 +32,7 @@ func serveV1Assets(w http.ResponseWriter, r *http.Request) {
 	}
 
 	assetE8DepthPerPool, runeE8DepthPerPool, timestamp := timeseries.AssetAndRuneDepths()
-	window := stat.Window{time.Unix(0, 0), timestamp}
+	window := stat.Window{Since: time.Unix(0, 0), Until: timestamp}
 
 	array := make([]interface{}, len(assets))
 	for i, asset := range assets {
@@ -196,9 +197,11 @@ func serveV1PoolsAsset(w http.ResponseWriter, r *http.Request) {
 	}
 
 	assetE8DepthPerPool, runeE8DepthPerPool, timestamp := timeseries.AssetAndRuneDepths()
-	window := stat.Window{time.Unix(0, 0), timestamp}
+	window := stat.Window{Since: time.Unix(0, 0), Until: timestamp}
 
-	m, err := poolsAsset(r.Context(), asset, assetE8DepthPerPool, runeE8DepthPerPool, window)
+	// TODO(acsaba): this is not final. Either change the function signature,
+	// or provide a sane height here.
+	m, err := poolsAsset(r.Context(), asset, -1, assetE8DepthPerPool, runeE8DepthPerPool, window)
 	if err != nil {
 		respError(w, r, err)
 		return
@@ -209,8 +212,19 @@ func serveV1PoolsAsset(w http.ResponseWriter, r *http.Request) {
 
 // compatibility layer
 func serveV1PoolsDetail(w http.ResponseWriter, r *http.Request) {
-	assetE8DepthPerPool, runeE8DepthPerPool, timestamp := timeseries.AssetAndRuneDepths()
-	window := stat.Window{time.Unix(0, 0), timestamp}
+	// TODO(acsaba): remove log
+	log.Print("Detail request: ", r.URL.RequestURI())
+
+	height, err := heightParam(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	// TODO(acsaba): remove log
+	log.Print("returning depths for height: ", height)
+
+	assetE8DepthPerPool, runeE8DepthPerPool, timestamp := timeseries.AssetAndRuneDepthsAtHeight(height)
+	window := stat.Window{Since: time.Unix(0, 0), Until: timestamp}
 
 	assets, err := assetParam(r)
 	if err != nil {
@@ -219,7 +233,7 @@ func serveV1PoolsDetail(w http.ResponseWriter, r *http.Request) {
 	}
 	array := make([]interface{}, len(assets))
 	for i, asset := range assets {
-		m, err := poolsAsset(r.Context(), asset, assetE8DepthPerPool, runeE8DepthPerPool, window)
+		m, err := poolsAsset(r.Context(), asset, height, assetE8DepthPerPool, runeE8DepthPerPool, window)
 		if err != nil {
 			respError(w, r, err)
 			return
@@ -230,7 +244,7 @@ func serveV1PoolsDetail(w http.ResponseWriter, r *http.Request) {
 	respJSON(w, array)
 }
 
-func poolsAsset(ctx context.Context, asset string, assetE8DepthPerPool, runeE8DepthPerPool map[string]int64, window stat.Window) (map[string]interface{}, error) {
+func poolsAsset(ctx context.Context, asset string, height int64, assetE8DepthPerPool, runeE8DepthPerPool map[string]int64, window stat.Window) (map[string]interface{}, error) {
 	status, err := timeseries.PoolStatus(ctx, asset, window.Until)
 	if err != nil {
 		return nil, err
@@ -260,6 +274,7 @@ func poolsAsset(ctx context.Context, asset string, assetE8DepthPerPool, runeE8De
 	runeDepth := runeE8DepthPerPool[asset]
 
 	m := map[string]interface{}{
+		"height":           intStr(height),
 		"asset":            asset,
 		"assetDepth":       intStr(assetDepth),
 		"assetStakedTotal": intStr(stakes.AssetE8Total),
@@ -407,7 +422,7 @@ func serveV1StakersAddr(w http.ResponseWriter, r *http.Request) {
 
 func serveV1Stats(w http.ResponseWriter, r *http.Request) {
 	_, runeE8DepthPerPool, timestamp := timeseries.AssetAndRuneDepths()
-	window := stat.Window{time.Unix(0, 0), timestamp}
+	window := stat.Window{Since: time.Unix(0, 0), Until: timestamp}
 
 	stakes, err := stat.StakesLookup(r.Context(), window)
 	if err != nil {
@@ -489,6 +504,29 @@ func assetParam(r *http.Request) ([]string, error) {
 		return nil, errors.New("too many entries in asset query parameter")
 	}
 	return assets, nil
+}
+
+// Return the value of the height url parameter.
+// If height parameter is missing or it's -1 it returns the height of the latest block.
+func heightParam(r *http.Request) (int64, error) {
+	lastHeight, _, _ := timeseries.LastBlock()
+	heightParams := r.URL.Query()["height"]
+	if len(heightParams) == 0 {
+		return lastHeight, nil
+	} else if 1 < len(heightParams) {
+		return -1, errors.New("too many height parameters")
+	}
+	height, err := strconv.ParseInt(heightParams[0], 10, 64)
+	if err != nil {
+		return -1, fmt.Errorf("couldn't parse block parameter as int: %w", err)
+	}
+	if height == -1 {
+		return lastHeight, nil
+	}
+	if height <= 0 || lastHeight < height {
+		return -1, fmt.Errorf("block parameter is out of bounds: %d", height)
+	}
+	return height, nil
 }
 
 func respJSON(w http.ResponseWriter, body interface{}) {

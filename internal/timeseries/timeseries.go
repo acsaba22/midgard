@@ -37,12 +37,23 @@ type aggTrack struct {
 	RuneE8DepthPerPool  map[string]int64
 }
 
-// Setup initializes the package. The previous state is restored (if there was any).
-func Setup() (lastBlockHeight int64, lastBlockTimestamp time.Time, lastBlockHash []byte, err error) {
-	const q = "SELECT height, timestamp, hash, agg_state FROM block_log ORDER BY height DESC LIMIT 1"
+// Read state from database.
+// If height == -1 reads last height from database.
+
+func loadBlockFromDB(height int64) (*blockTrack, error) {
+	var restriction string
+	if 0 < height {
+		restriction = fmt.Sprintf("WHERE height = %d", height)
+	} else {
+		restriction = "ORDER BY height DESC LIMIT 1"
+	}
+	q := "SELECT height, timestamp, hash, agg_state FROM block_log " + restriction
+
+	log.Printf("Running query on DB %s", q)
+
 	rows, err := DBQuery(context.Background(), q)
 	if err != nil {
-		return 0, time.Time{}, nil, fmt.Errorf("last block lookup: %w", err)
+		return nil, fmt.Errorf("last block lookup: %w", err)
 	}
 	defer rows.Close()
 
@@ -53,12 +64,26 @@ func Setup() (lastBlockHeight int64, lastBlockTimestamp time.Time, lastBlockHash
 		rows.Scan(&track.Height, &ns, &track.Hash, &aggSerial)
 		track.Timestamp = time.Unix(0, ns)
 		if err := gob.NewDecoder(bytes.NewReader(aggSerial)).Decode(&track.aggTrack); err != nil {
-			return 0, time.Time{}, nil, fmt.Errorf("restore with malformed aggregation state denied on %w", err)
+			return nil, fmt.Errorf("restore with malformed aggregation state denied on %w", err)
 		}
 	}
 
+	if rows.Err() != nil {
+		return nil, rows.Err()
+	}
+
+	return &track, nil
+}
+
+// Setup initializes the package. The previous state is restored (if there was any).
+func Setup() (lastBlockHeight int64, lastBlockTimestamp time.Time, lastBlockHash []byte, err error) {
+	track, err := loadBlockFromDB(-1)
+	if err != nil {
+		return 0, time.Time{}, nil, err
+	}
+
 	// sync in-memory tracker
-	lastBlockTrack.Store(&track)
+	lastBlockTrack.Store(track)
 
 	// apply aggregation state to recorder
 	for pool, E8 := range track.AssetE8DepthPerPool {
@@ -70,7 +95,7 @@ func Setup() (lastBlockHeight int64, lastBlockTimestamp time.Time, lastBlockHash
 		recorder.runeE8DepthPerPool[pool] = &v
 	}
 
-	return track.Height, track.Timestamp, track.Hash, rows.Err()
+	return track.Height, track.Timestamp, track.Hash, nil
 }
 
 // CommitBlock marks the given height as done.
@@ -127,5 +152,17 @@ func LastBlock() (height int64, timestamp time.Time, hash []byte) {
 // The asset price is the asset depth divided by the RUNE depth.
 func AssetAndRuneDepths() (assetE8PerPool, runeE8PerPool map[string]int64, timestamp time.Time) {
 	track := lastBlockTrack.Load().(*blockTrack)
+	return track.aggTrack.AssetE8DepthPerPool, track.aggTrack.RuneE8DepthPerPool, track.Timestamp
+}
+
+// Same as AsAssetAndRuneDepths but for specific height
+func AssetAndRuneDepthsAtHeight(height int64) (assetE8PerPool, runeE8PerPool map[string]int64, timestamp time.Time) {
+	track, err := loadBlockFromDB(height)
+	if err != nil {
+		log.Print("Error on db query: ", err)
+		empty := map[string]int64{}
+		return empty, empty, time.Time{}
+	}
+	log.Print("track at hight: ", *track)
 	return track.aggTrack.AssetE8DepthPerPool, track.aggTrack.RuneE8DepthPerPool, track.Timestamp
 }
