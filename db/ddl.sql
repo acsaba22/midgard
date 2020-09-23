@@ -9,6 +9,21 @@ CREATE TABLE block_log (
 );
 
 
+-- Sparse table for depths.
+-- Not every height/pool pair is filled. For missing values, use the latest existing height for a pool.
+-- Asset and Rune are filled together, so it's not needed to look back for them separately.
+-- NOT IMPLEMENTED YET
+-- TODO(acsaba): block_log.agg_state is 100x bigger than everything else combined in the database.
+--     When this table is implemented remove block_log.agg_state, and use this instead.
+CREATE TABLE aggregate_states (
+	height			BIGINT NOT NULL,
+	pool			VARCHAR(60) NOT NULL,
+	asset_E8		BIGINT NOT NULL,
+	rune_E8			BIGINT NOT NULL,
+	PRIMARY KEY (height, pool)
+);
+
+
 CREATE TABLE active_vault_events (
 	add_asgard_addr		VARCHAR(90) NOT NULL,
 	block_timestamp		BIGINT NOT NULL
